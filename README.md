@@ -108,7 +108,6 @@ Le CD, déclenché lors d'un push vers main, comporte deux phases :
 4\. 📦 Structure Recommandée du Répertoire
 ------------------------------------------
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   
 /  ├── cloudformation/                 # Templates CloudFormation  
 
 │   ├── ec2-web-db.yml                      
