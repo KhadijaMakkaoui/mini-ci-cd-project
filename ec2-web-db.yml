@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Public WebApp EC2 + Private MySQL EC2 inside an existing VPC (clean version)
+
+Parameters:
+
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public Subnet for WebApp
+
+  PrivateSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private Subnet for MySQL
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair Name
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: MySQL root/admin password
+
+  WebServerImageId:
+    Type: AWS::EC2::Image::Id
+    Description: AMI for Web Server (Amazon Linux 2023 recommended)
+
+  DBServerImageId:
+    Type: AWS::EC2::Image::Id
+    Description: AMI for MySQL Server (Amazon Linux 2023 recommended)
+
+Resources:
+  # -------------------------------
+  # IAM Roles and Profiles (for CloudWatch/SSM)
+  # -------------------------------
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  WebServerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WebServerRole
+
+  # -------------------------------
+  # Web SG (Public Access)
+  # -------------------------------
+  WebSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPCId
+      GroupDescription: Allow HTTP + SSH
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  # -------------------------------
+  # DB SG (Private Access only from WebSG)
+  # -------------------------------
+  DBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPCId
+      GroupDescription: Allow MySQL only from WebSG
+      SecurityGroupIngress:
+        # Allow MySQL traffic (3306) only from instances in WebSG
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebSG
+        # Allow SSH traffic (22) only from instances in WebSG for troubleshooting
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref WebSG
+
+  # -------------------------------
+  # PRIVATE MySQL Server EC2
+  # -------------------------------
+  DBServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref DBServerImageId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PrivateSubnetId
+      SecurityGroupIds:
+        - !Ref DBSG
+      Tags:
+        - Key: Name
+          Value: Private-MySQL-Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          
+          # Install MySQL 8 (Amazon Linux 2023 uses mysql-server package)
+          dnf install -y mysql-server
+          systemctl enable mysqld
+          systemctl start mysqld
+
+          # CRITICAL FIX: Allow external connections by setting bind-address
+          echo "[mysqld]" > /etc/my.cnf.d/bind.cnf
+          echo "bind-address=0.0.0.0" >> /etc/my.cnf.d/bind.cnf
+          systemctl restart mysqld
+          sleep 10 # Wait for DB to be ready
+
+          # Configure MySQL
+          mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DBPassword}';"
+          mysql -u root -p${DBPassword} -e "CREATE DATABASE appdb;"
+          mysql -u root -p${DBPassword} -e "CREATE USER 'admin'@'%' IDENTIFIED BY '${DBPassword}';"
+          mysql -u root -p${DBPassword} -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%' WITH GRANT OPTION;"
+          mysql -u root -p${DBPassword} -e "FLUSH PRIVILEGES;"
+          mysql -u root -p${DBPassword} -e "USE appdb; CREATE TABLE message (id INT AUTO_INCREMENT PRIMARY KEY, text VARCHAR(255));"
+          mysql -u root -p${DBPassword} -e "INSERT INTO appdb.message (text) VALUES ('Hello from MySQL Private EC2!');"
+
+
+  # -------------------------------
+  # PUBLIC Web Server EC2
+  # -------------------------------
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref WebServerImageId
+      IamInstanceProfile: !Ref WebServerProfile
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnetId
+      SecurityGroupIds:
+        - !Ref WebSG
+      Tags:
+        - Key: Name
+          Value: Public-Web-Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          # Install Web Server stack (httpd, php, mysql connector)
+          dnf install -y httpd php php-mysqli
+          systemctl enable --now httpd
+
+          # ---------- INSTALL & CONFIGURE CLOUDWATCH AGENT (Optional Monitoring) ----------
+          dnf install -y amazon-cloudwatch-agent
+
+          # Create CloudWatch Agent config
+          cat << 'EOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+          {
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/httpd/error_log",
+                      "log_group_name": "/aws/ec2/webapp/apache/error",
+                      "log_stream_name": "{instance_id}"
+                    },
+                    {
+                      "file_path": "/var/log/httpd/access_log",
+                      "log_group_name": "/aws/ec2/webapp/apache/access",
+                      "log_stream_name": "{instance_id}"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+
+          # Start CloudWatch Agent
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a start -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+
+          # ---------- PHP APP DEPLOYMENT ----------
+          cat <<EOF > /var/www/html/index.php
+          <html>
+          <body>
+          <h1>Hello from WebApp</h1>
+          <?php
+            // Use the private IP allocated by CloudFormation
+            \$conn = new mysqli("${DBServer.PrivateIp}", "admin", "${DBPassword}", "appdb");
+            if (\$conn->connect_error) { 
+              echo "<h2>DB Connection Error!</h2>";
+              // Display the raw error for troubleshooting
+              echo "Error details: " . \$conn->connect_error;
+            } else {
+              \$result = \$conn->query("SELECT text FROM message LIMIT 1");
+              if (\$row = \$result->fetch_assoc()) {
+                echo "<h2>DB message: " . \$row["text"] . "</h2>";
+              } else {
+                echo "<h2>DB Message: No message found.</h2>";
+              }
+            }
+          ?>
+          </body>
+          </html>
+          EOF
+ 
+
+Outputs:
+
+  WebServerPublicIP:
+    Value: !GetAtt WebServer.PublicIp
+    Description: Access your web app here
+
+  PrivateDBIP:
+    Value: !GetAtt DBServer.PrivateIp
+    Description: MySQL Private IP
