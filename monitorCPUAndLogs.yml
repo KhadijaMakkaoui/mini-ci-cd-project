@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Enable CloudWatch Monitoring for WebApp (CPU + Apache Logs)
+
+Parameters:
+  WebAppInstanceId:
+    Type: String
+    Description: EC2 Instance ID of the WebApp server
+
+Resources:
+
+  ##############################################
+  # IAM Role + Instance Profile
+  ##############################################
+  CWAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  CWAgentInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CWAgentRole
+
+  ##############################################
+  # Attach IAM Profile to EC2 via SSM
+  ##############################################
+  AttachProfile:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-RunShellScript
+      InstanceId: !Ref WebAppInstanceId
+      Parameters:
+        commands:
+          - |
+            echo "Attaching IAM InstanceProfile..."
+            sudo mkdir -p /etc/systemd/system/ec2-instance-connect.service.d
+            sudo yum install -y awscli
+
+            REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+
+            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+            aws ec2 associate-iam-instance-profile \
+              --region $REGION \
+              --iam-instance-profile Arn=$(aws iam get-instance-profile --instance-profile-name $(aws iam list-instance-profiles --query "InstanceProfiles[?contains(Roles[*].RoleName, 'CWAgentRole')].InstanceProfileName" --output text) | jq -r ".InstanceProfile.Arn") \
+              --instance-id $INSTANCE_ID
+
+  ##############################################
+  # CloudWatch Log Group
+  ##############################################
+  WebAppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/webapp/apache"
+      RetentionInDays: 14
+
+  ##############################################
+  # CloudWatch Agent Configuration
+  ##############################################
+  CWAgentConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/cloudwatch/webapp/config"
+      Type: String
+      Value: |
+        {
+          "logs": {
+            "logs_collected": {
+              "files": {
+                "collect_list": [
+                  {
+                    "file_path": "/var/log/httpd/error_log",
+                    "log_group_name": "/webapp/apache",
+                    "log_stream_name": "{instance_id}-error"
+                  },
+                  {
+                    "file_path": "/var/log/httpd/access_log",
+                    "log_group_name": "/webapp/apache",
+                    "log_stream_name": "{instance_id}-access"
+                  }
+                ]
+              }
+            }
+          },
+          "metrics": {
+            "append_dimensions": {
+              "InstanceId": "${aws:InstanceId}"
+            },
+            "metrics_collected": {
+              "cpu": {
+                "measurement": [
+                  "cpu_usage_idle",
+                  "cpu_usage_user",
+                  "cpu_usage_system"
+                ],
+                "metrics_collection_interval": 60
+              }
+            }
+          }
+        }
+
+  ##############################################
+  # Install CloudWatch Agent
+  ##############################################
+  InstallCWAgent:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-ConfigureAWSPackage
+      InstanceId: !Ref WebAppInstanceId
+      Parameters:
+        action: ["Install"]
+        name: ["AmazonCloudWatchAgent"]
+
+  ##############################################
+  # Start CloudWatch Agent with config
+  ##############################################
+  StartCWAgent:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AmazonCloudWatch-ManageAgent
+      InstanceId: !Ref WebAppInstanceId
+      Parameters:
+        mode: ["ec2"]
+        optionalConfigurationSource: ["ssm"]
+        optionalConfigurationLocation: ["/cloudwatch/webapp/config"]
+        optionalRestart: ["yes"]
+
+  ##############################################
+  # CPU Alarm
+  ##############################################
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "WebApp-High-CPU"
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Average
+      Threshold: 70
+      AlarmDescription: "Alarm when CPU exceeds 70%"
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref WebAppInstanceId
+      ActionsEnabled: false
+
+Outputs:
+  LogGroup:
+    Value: "/webapp/apache"
+    Description: CloudWatch Log Group storing Apache logs
+
+  CPUAlarmName:
+    Value: !Ref HighCPUAlarm
+    Description: CloudWatch Alarm for CPU usage

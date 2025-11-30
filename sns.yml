@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SNS Alerts + Email Subscription + CPU Alarm for EC2 Instance
+
+Parameters:
+  WebAppInstanceId:
+    Type: String
+    Description: EC2 Instance ID to monitor
+
+  AlertEmail:
+    Type: String
+    Description: Email address to receive alerts
+
+Resources:
+
+  ##############################################
+  # SNS Topic
+  ##############################################
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WebApp-Alerts
+
+  ##############################################
+  # SNS Email Subscription
+  ##############################################
+  SNSTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      TopicArn: !Ref SNSTopic
+
+  ##############################################
+  # CloudWatch Alarm (CPU > 70%)
+  ##############################################
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "WebApp-CPU-High"
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Average
+      Threshold: 70
+      AlarmDescription: "Send SNS alert when CPU exceeds 70%"
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref WebAppInstanceId
+      AlarmActions:
+        - !Ref SNSTopic
+      OKActions:
+        - !Ref SNSTopic
+      ActionsEnabled: true
+
+Outputs:
+  SNSAlertTopic:
+    Description: SNS Topic for Alerts
+    Value: !Ref SNSTopic
+
+  HighCPUAlarmName:
+    Description: CloudWatch Alarm name
+    Value: !Ref HighCPUAlarm
