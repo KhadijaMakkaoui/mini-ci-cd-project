@@ -38,6 +38,10 @@ Le flux de l'application est structuré comme suit :
 
 <img width="1536" height="1024" alt="c67ccae0-6e7d-4ed6-ac95-a9a0a33f3dae" src="https://github.com/user-attachments/assets/4f82005b-1bed-4b1e-853c-f90f15f61795" />
 
+### Web App accessible publiquement
+
+<img width="955" height="144" alt="Screenshot 2025-11-30 154358" src="https://github.com/user-attachments/assets/d8866dbd-07b3-4309-a1f2-e1bab87dac4c" />
+
   
   
 
